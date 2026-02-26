@@ -16,7 +16,7 @@ e = np.linspace(0, 1, 5)
 assert np.all(e == np.array([0., 0.25, 0.5, 0.75, 1.0]))
 
 f = np.arange(5 * 5).reshape(5, 5)
-fc = f[:, 1:4:2]
+fc = f[0:5:2, 1:4:2]
 assert np.all(fc == np.array([[1, 3], [11, 13], [21, 23]]))
 
 g = np.ones((5, 3))
