@@ -1,40 +1,46 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import glob
+import os
 from scipy import ndimage
 
-path = "out/h_*.npy"
+# Получаем путь к папке со скриптом
+script_dir = os.path.dirname(os.path.abspath(__file__))
+path = os.path.join(script_dir, "out", "h_*.npy")
 
 files = sorted(glob.glob(path))
 
+print(f"Ищу файлы: {path}")
+print(f"Найдено файлов: {len(files)}")
+
 traector = {}
 
-for num, file_path in enumerate(files):
+for frame_num, file_path in enumerate(files):
     frame = np.load(file_path)
-    labeled, num_obj = ndimage.label(frame > np.mean(frame) + np.std(frame))
+    labeled, num_objects = ndimage.label(frame > np.mean(frame) + np.std(frame))
     
-    crnt_obj = []
-    for obj_id in range(1, num_obj + 1):
+    current_objects = []
+    for obj_id in range(1, num_objects + 1):
         mask = labeled == obj_id
         if mask.sum() > 10:
             y, x = ndimage.center_of_mass(mask)
-            crnt_obj.append((x, y))
+            current_objects.append((x, y))
     
-    if num == 0:
-        for i, (x, y) in enumerate(crnt_obj):
+    if frame_num == 0:
+        for i, (x, y) in enumerate(current_objects):
             traector[i] = [(x, y)]
     else:
-        used_obj = []
+        used_objects = []
         
-        for id, points in traector.items():
+        for track_id, points in traector.items():
             last_x, last_y = points[-1]
             
             best_dist = 1000
             best_obj = None
             best_idx = -1
             
-            for idx, (x, y) in enumerate(crnt_obj):
-                if idx in used_obj:
+            for idx, (x, y) in enumerate(current_objects):
+                if idx in used_objects:
                     continue
                 dist = abs(x - last_x) + abs(y - last_y)
                 if dist < best_dist:
@@ -43,21 +49,23 @@ for num, file_path in enumerate(files):
                     best_idx = idx
             
             if best_dist < 50 and best_obj is not None:
-                traector[id].append(best_obj)
-                used_obj.append(best_idx)
+                traector[track_id].append(best_obj)
+                used_objects.append(best_idx)
         
-        for idx, (x, y) in enumerate(crnt_obj):
-            if idx not in used_obj:
+        for idx, (x, y) in enumerate(current_objects):
+            if idx not in used_objects:
                 if traector:
                     new_id = max(traector.keys()) + 1
                 else:
                     new_id = 0
                 traector[new_id] = [(x, y)]
 
+print(f"Всего треков: {len(traector)}")
+
 for id, points in traector.items():
     if len(points) > 1:
         coords = np.array(points)
-        plt.plot(coords[:, 0], coords[:, 1], 'o-')
+        plt.plot(coords[:, 0], coords[:, 1], 'o-', color="blue")
 
 plt.axis('equal')
 plt.show()
