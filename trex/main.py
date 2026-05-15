@@ -4,162 +4,153 @@ import mss
 import numpy as np
 
 def wait_for_s(text):
-    screen = np.zeros((180, 650, 3), dtype=np.uint8)
+    screen = np.zeros((180, 700, 3), dtype=np.uint8)
     cv2.putText(screen, text, (20, 90),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     while True:
-        cv2.imshow("Press S", screen)
+        cv2.imshow("Setup", screen)
         if cv2.waitKey(1) & 0xFF == ord('s'):
             break
     cv2.destroyAllWindows()
 
-def select_area(name, scale=0.6):
+def select_area(name):
     wait_for_s(f"Открой игру, нажми S для {name}")
 
     with mss.mss() as sct:
         screenshot = sct.grab(sct.monitors[0])
         img = np.array(screenshot)[:, :, :3].copy()
 
-        h, w = img.shape[:2]
-        crop_w = int(w * 0.7)
-        crop_h = int(h * 0.5)
-
-        start_x = (w - crop_w) // 2
-        start_y = (h - crop_h) // 4
-
-        cropped = img[start_y:start_y + crop_h, start_x:start_x + crop_w]
-        small = cv2.resize(cropped, (0, 0), fx=scale, fy=scale)
-
-        roi = cv2.selectROI(name, small, False, False)
+        roi = cv2.selectROI(name, img, False, False)
         cv2.destroyAllWindows()
 
-        x, y, w_roi, h_roi = roi
-
-        return {
-            "top": int(start_y + y / scale),
-            "left": int(start_x + x / scale),
-            "width": int(w_roi / scale),
-            "height": int(h_roi / scale)
-        }
-
-def count_dark(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY_INV)
-    return cv2.countNonZero(thresh)
+        x, y, w, h = roi
+        return {"left": x, "top": y, "width": w, "height": h}
 
 def main():
     print("1. Выбери всю область игры")
     game_area = select_area("Game Area")
 
-    print("2. Выбери БЛИЖНЮЮ зону (красная)")
-    near_area = select_area("Near Area")
+    print("2. Выбери динозавра")
+    dino_area = select_area("Dino")
+
+    print("3. Выбери зону перед динозавром")
+    detect_area = select_area("Detect Area")
 
     cooldown = 0
-    jump_type = 1
-    score = 0
-    red_growth = 0
-    blue_growth = 0
+    frames = 0
+    second_jump_needed = False
 
     with mss.mss() as sct:
+        first_frame = np.array(sct.grab(game_area))[:, :, :3].copy()
+
+        dx = dino_area["left"] - game_area["left"]
+        dy = dino_area["top"] - game_area["top"]
+        dw = dino_area["width"]
+        dh = dino_area["height"]
+
+        template = cv2.cvtColor(first_frame[dy:dy+dh, dx:dx+dw], cv2.COLOR_BGR2GRAY)
+        ground_y = dy
+
         while True:
+            frames += 1
             frame = np.array(sct.grab(game_area))[:, :, :3].copy()
 
-            nrx = near_area["left"] - game_area["left"]
-            nry = near_area["top"] - game_area["top"] - 3
+            gx = detect_area["left"] - game_area["left"]
+            gy = detect_area["top"] - game_area["top"]
+            base_w = detect_area["width"]
+            gh = detect_area["height"]
 
-            # красная зона
-            red_width = near_area["width"] + red_growth
-            red_width = min(red_width, 230)
+            # НОРМАЛЬНЫЙ рост зоны
+            dynamic_w = base_w + frames // 50
+            dynamic_w = min(dynamic_w, base_w + 180)
 
-            # синяя зона автоматически справа
-            blue_x = nrx + red_width + 5
+            zone = frame[gy:gy+gh, gx:gx+dynamic_w]
 
-            blue_width = int(red_width * 1.7)
+            gray = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY)
+            _, thresh = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY_INV)
+            thresh[-8:, :] = 0
 
-# ограничение
-            blue_width = min(blue_width, 170)
+            contours, _ = cv2.findContours(
+                thresh,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE
+            )
 
-            if blue_x + blue_width > frame.shape[1]:
-                blue_width = frame.shape[1] - blue_x - 1
+            obstacles = []
 
-            # красная
-            top_strip = frame[nry:nry+near_area["height"]//2, nrx:nrx+red_width]
-            bottom_strip = frame[nry+near_area["height"]//2:nry+near_area["height"], nrx:nrx+red_width]
-            near_pixels = count_dark(top_strip) + count_dark(bottom_strip)
+            for c in contours:
+                bx, by, bw, bh = cv2.boundingRect(c)
+                if bh > 12 and bw > 2:
+                    obstacles.append((bx, bw, bh))
 
-            # синяя
-            far_img = frame[nry:nry+near_area["height"], blue_x:blue_x+blue_width]
-            far_pixels = count_dark(far_img)
+            obstacles.sort(key=lambda obj: obj[0])
 
-            far_total = far_img.shape[0] * far_img.shape[1]
-            far_ratio = far_pixels / far_total
+            game_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            result = cv2.matchTemplate(game_gray, template, cv2.TM_CCOEFF_NORMED)
+            _, _, _, max_loc = cv2.minMaxLoc(result)
 
-            if far_ratio > 0.050:
-                jump_type = 3
-            elif far_ratio > 0.018:
-                jump_type = 2
-            else:
-                jump_type = 1
+            dino_y = max_loc[1]
+            dino_on_ground = dino_y >= ground_y - 5
 
             if cooldown > 0:
                 cooldown -= 1
 
-            if near_pixels > 20 and cooldown == 0:
-                pyautogui.keyDown('space')
-
-                if jump_type == 1:
-                    cv2.waitKey(35)
-                elif jump_type == 2:
-                    cv2.waitKey(65)
-                else:
-                    cv2.waitKey(110)
-
-                pyautogui.keyUp('space')
-                cooldown = 9
-
-            # game over
-            game_over_zone = frame[0:80, 250:520]
-            over_pixels = count_dark(game_over_zone)
-
-            if over_pixels > 500:
-                cv2.waitKey(500)
+            if dino_on_ground and second_jump_needed and cooldown == 0:
                 pyautogui.press('space')
-                red_growth = 0
-                blue_growth = 0
-                score = 0
+                cooldown = 5
+                second_jump_needed = False
 
-            if over_pixels < 500:
-                score += 1
+            if obstacles and cooldown == 0:
+                first_x, first_w, first_h = obstacles[0]
+                center_x = first_x + first_w // 2
 
-            # рост зон
-            if score % 120 == 0:
-                red_growth += 2
-                blue_growth += 6
+                trigger = 45
 
-                red_growth = min(red_growth, 120)
-                blue_growth = min(blue_growth, 140)
+                if first_w > 16 or first_h > 25:
+                    hold = 3
+                else:
+                    hold = 1
 
-            # рисуем
-            cv2.rectangle(frame,
-                          (nrx, nry),
-                          (nrx + red_width, nry + near_area["height"]),
-                          (0, 0, 255), 2)
+                if center_x < trigger:
+                    pyautogui.keyDown('space')
 
-            cv2.rectangle(frame,
-                          (blue_x, nry),
-                          (blue_x + blue_width, nry + near_area["height"]),
-                          (255, 0, 0), 2)
+                    for _ in range(hold):
+                        cv2.waitKey(12)
 
-            cv2.putText(frame,
-                        f"near={near_pixels} far={far_pixels} jump={jump_type}",
-                        (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (0, 255, 0),
-                        2)
+                    pyautogui.keyUp('space')
+                    cooldown = 4
 
-            preview = cv2.resize(frame, (900, 320))
-            cv2.imshow("T-Rex Bot", preview)
+            if not dino_on_ground and len(obstacles) > 1:
+                first_x, first_w, _ = obstacles[0]
+                second_x = obstacles[1][0]
+
+                gap = second_x - (first_x + first_w)
+
+                if 0 < gap < 35:
+                    second_jump_needed = True
+
+            center = frame[0:100, frame.shape[1]//3:frame.shape[1]//3*2]
+            gray2 = cv2.cvtColor(center, cv2.COLOR_BGR2GRAY)
+            _, over = cv2.threshold(gray2, 170, 255, cv2.THRESH_BINARY_INV)
+
+            if cv2.countNonZero(over) > 500:
+                pyautogui.press('space')
+                second_jump_needed = False
+                frames = 0
+
+            cv2.rectangle(frame, (gx, gy), (gx+dynamic_w, gy+gh), (0, 0, 255), 2)
+
+            for obs in obstacles:
+                ox, ow, oh = obs
+                cv2.rectangle(frame,
+                              (gx+ox, gy+gh-oh),
+                              (gx+ox+ow, gy+gh),
+                              (255, 0, 0), 2)
+
+            cv2.putText(frame, f"width={dynamic_w}", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+            cv2.imshow("T-Rex Bot", cv2.resize(frame, (1000, 300)))
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
